@@ -299,9 +299,7 @@ impl VulkanRenderer {
         surface_instance: &ash::khr::surface::Instance,
         surface: vk::SurfaceKHR,
     ) -> bool {
-        Self::find_queue_families(instance, device, surface_instance, surface)
-            .graphics_family
-            .is_some()
+        Self::find_queue_families(instance, device, surface_instance, surface).is_complete()
     }
 
     fn find_queue_families(
@@ -312,10 +310,7 @@ impl VulkanRenderer {
     ) -> QueueFamilyIndices {
         let queue_family_properties =
             unsafe { instance.get_physical_device_queue_family_properties(device) };
-        let mut queue_family_indices = QueueFamilyIndices {
-            graphics_family: None,
-            presentation_family: None,
-        };
+        let mut queue_family_indices = QueueFamilyIndices::new();
         for (idx, queue_family_property) in queue_family_properties.iter().enumerate() {
             if queue_family_property
                 .queue_flags
@@ -422,6 +417,18 @@ impl VulkanRenderer {
 struct QueueFamilyIndices {
     graphics_family: Option<u32>,
     presentation_family: Option<u32>,
+}
+
+impl QueueFamilyIndices {
+    fn new() -> QueueFamilyIndices {
+        QueueFamilyIndices {
+            graphics_family: None,
+            presentation_family: None,
+        }
+    }
+    fn is_complete(&self) -> bool {
+        self.graphics_family.is_some() && self.presentation_family.is_some()
+    }
 }
 
 impl Drop for VulkanRenderer {
