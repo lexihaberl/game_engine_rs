@@ -2,6 +2,8 @@ use crate::config;
 use crate::utils;
 use ash::ext::debug_utils;
 use ash::{vk, Entry};
+use core::panic;
+use std::cmp::Reverse;
 use std::error::Error;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
@@ -36,6 +38,7 @@ pub struct VulkanRenderer {
     entry: Entry, //we aren't allowed to call any Vulkan functions after entry is dropped!
     instance: ash::Instance,
     debug_utils_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    physical_device: vk::PhysicalDevice,
 }
 
 impl VulkanRenderer {
@@ -48,10 +51,12 @@ impl VulkanRenderer {
         } else {
             None
         };
+        let physical_device = Self::get_physical_device(&instance);
         Ok(VulkanRenderer {
             entry,
             instance,
             debug_utils_messenger,
+            physical_device,
         })
     }
 
@@ -204,8 +209,8 @@ impl VulkanRenderer {
             p_next: ptr::null(),
             flags: vk::DebugUtilsMessengerCreateFlagsEXT::empty(),
             message_severity: vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE
-                | vk::DebugUtilsMessageSeverityFlagsEXT::INFO
+                // | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE
+                // | vk::DebugUtilsMessageSeverityFlagsEXT::INFO
                 | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
             message_type: vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
                 | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
@@ -225,6 +230,56 @@ impl VulkanRenderer {
         let debug_utils_messenger =
             unsafe { debug_utils_instance.create_debug_utils_messenger(&create_info, None) }?;
         Ok(debug_utils_messenger)
+    }
+
+    fn get_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
+        let physical_devices = unsafe {
+            instance
+                .enumerate_physical_devices()
+                .expect("There should be atleast one working Vulkan device!")
+        };
+
+        println!(
+            "Found {} devices with Vulkan support",
+            physical_devices.len()
+        );
+
+        let mut suitable_physical_devices: Vec<vk::PhysicalDevice> = physical_devices
+            .into_iter()
+            .filter(|device| Self::is_device_suitable(instance, *device))
+            .collect();
+        println!("Found {} suitable devices", suitable_physical_devices.len());
+
+        suitable_physical_devices
+            .sort_by_key(|device| Reverse(Self::get_device_suitability_score(instance, *device)));
+
+        if suitable_physical_devices.is_empty() {
+            panic!("No suitable devices found!")
+        }
+
+        let device_properties =
+            unsafe { instance.get_physical_device_properties(suitable_physical_devices[0]) };
+        let device_name = device_properties
+            .device_name_as_c_str()
+            .expect("Should be able to convert dev name to c_str");
+        println!("Choosing device {:?}", device_name);
+        suitable_physical_devices[0]
+    }
+
+    fn is_device_suitable(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
+        true
+    }
+
+    fn get_device_suitability_score(instance: &ash::Instance, device: vk::PhysicalDevice) -> u64 {
+        let device_properties = unsafe { instance.get_physical_device_properties(device) };
+        let mut score = 0;
+        score += match device_properties.device_type {
+            vk::PhysicalDeviceType::DISCRETE_GPU => 1000,
+            vk::PhysicalDeviceType::INTEGRATED_GPU => 100,
+            vk::PhysicalDeviceType::CPU => 10,
+            _ => 0,
+        };
+        score
     }
 
     pub fn draw(&self) {}
