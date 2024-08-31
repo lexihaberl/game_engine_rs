@@ -39,6 +39,8 @@ pub struct VulkanRenderer {
     instance: ash::Instance,
     debug_utils_messenger: Option<vk::DebugUtilsMessengerEXT>,
     physical_device: vk::PhysicalDevice,
+    logical_device: ash::Device,
+    graphics_queue: vk::Queue,
 }
 
 impl VulkanRenderer {
@@ -52,11 +54,18 @@ impl VulkanRenderer {
             None
         };
         let physical_device = Self::get_physical_device(&instance);
+        let (logical_device, graphics_queue) = VulkanRenderer::create_logical_device(
+            &instance,
+            physical_device,
+            vk::PhysicalDeviceFeatures::default(),
+        )?;
         Ok(VulkanRenderer {
             entry,
             instance,
             debug_utils_messenger,
             physical_device,
+            logical_device,
+            graphics_queue,
         })
     }
 
@@ -268,17 +277,30 @@ impl VulkanRenderer {
     }
 
     fn is_device_suitable(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
+        Self::find_queue_families(instance, device)
+            .graphics_family
+            .is_some()
+    }
+
+    fn find_queue_families(
+        instance: &ash::Instance,
+        device: vk::PhysicalDevice,
+    ) -> QueueFamilyIndices {
         let queue_family_properties =
             unsafe { instance.get_physical_device_queue_family_properties(device) };
-        for queue_family_property in queue_family_properties.iter() {
+        for (idx, queue_family_property) in queue_family_properties.iter().enumerate() {
             if queue_family_property
                 .queue_flags
                 .contains(vk::QueueFlags::GRAPHICS)
             {
-                return true;
+                return QueueFamilyIndices {
+                    graphics_family: Some(idx as u32),
+                };
             }
         }
-        false
+        QueueFamilyIndices {
+            graphics_family: None,
+        }
     }
 
     fn get_device_suitability_score(instance: &ash::Instance, device: vk::PhysicalDevice) -> u64 {
@@ -293,12 +315,56 @@ impl VulkanRenderer {
         score
     }
 
+    fn create_logical_device(
+        instance: &ash::Instance,
+        device: vk::PhysicalDevice,
+        required_device_features: vk::PhysicalDeviceFeatures,
+    ) -> Result<(ash::Device, vk::Queue), Box<dyn Error>> {
+        let queue_family_indices = Self::find_queue_families(instance, device);
+        let queue_family_index = queue_family_indices.graphics_family.expect(
+            "Graphics Family not found! Should not be possible since we checked for suitability!",
+        );
+        let device_queue_create_info = vk::DeviceQueueCreateInfo {
+            s_type: vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
+            p_next: ptr::null(),
+            queue_family_index,
+            queue_count: 1,
+            p_queue_priorities: [1.0].as_ptr(),
+            flags: vk::DeviceQueueCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let device_create_info = vk::DeviceCreateInfo {
+            s_type: vk::StructureType::DEVICE_CREATE_INFO,
+            p_queue_create_infos: &device_queue_create_info,
+            queue_create_info_count: 1,
+            p_enabled_features: &required_device_features,
+            p_next: ptr::null(),
+            enabled_extension_count: 0,
+            pp_enabled_extension_names: ptr::null(),
+            flags: vk::DeviceCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let logical_device = unsafe { instance.create_device(device, &device_create_info, None)? };
+        let device_queue = unsafe { logical_device.get_device_queue(queue_family_index, 0) };
+        Ok((logical_device, device_queue))
+    }
+
     pub fn draw(&self) {}
     pub fn swap_buffers(&self) {}
 }
 
+struct QueueFamilyIndices {
+    graphics_family: Option<u32>,
+}
+
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
+        unsafe {
+            self.logical_device.destroy_device(None);
+        }
+
         println!("Cleaning Up Vulkan Renderer");
         if let Some(debug_utils_messenger) = self.debug_utils_messenger {
             let debug_utils_instance = debug_utils::Instance::new(&self.entry, &self.instance);
