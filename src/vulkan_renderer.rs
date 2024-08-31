@@ -4,10 +4,12 @@ use ash::ext::debug_utils;
 use ash::{vk, Entry};
 use core::panic;
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::error::Error;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 use winit::raw_window_handle::HasDisplayHandle;
+use winit::raw_window_handle::HasWindowHandle;
 use winit::window::Window;
 
 unsafe extern "system" fn vulkan_debug_callback(
@@ -38,9 +40,12 @@ pub struct VulkanRenderer {
     entry: Entry, //we aren't allowed to call any Vulkan functions after entry is dropped!
     instance: ash::Instance,
     debug_utils_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    surface: vk::SurfaceKHR,
+    surface_instance: ash::khr::surface::Instance,
     physical_device: vk::PhysicalDevice,
     logical_device: ash::Device,
     graphics_queue: vk::Queue,
+    presentation_queue: vk::Queue,
 }
 
 impl VulkanRenderer {
@@ -53,19 +58,27 @@ impl VulkanRenderer {
         } else {
             None
         };
-        let physical_device = Self::get_physical_device(&instance);
-        let (logical_device, graphics_queue) = VulkanRenderer::create_logical_device(
-            &instance,
-            physical_device,
-            vk::PhysicalDeviceFeatures::default(),
-        )?;
+        let (surface, surface_instance) =
+            VulkanRenderer::create_surface(&entry, &instance, window)?;
+        let physical_device = Self::get_physical_device(&instance, &surface_instance, surface);
+        let (logical_device, graphics_queue, presentation_queue) =
+            VulkanRenderer::create_logical_device(
+                &instance,
+                physical_device,
+                vk::PhysicalDeviceFeatures::default(),
+                &surface_instance,
+                surface,
+            )?;
         Ok(VulkanRenderer {
             entry,
             instance,
             debug_utils_messenger,
+            surface,
+            surface_instance,
             physical_device,
             logical_device,
             graphics_queue,
+            presentation_queue,
         })
     }
 
@@ -241,7 +254,11 @@ impl VulkanRenderer {
         Ok(debug_utils_messenger)
     }
 
-    fn get_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
+    fn get_physical_device(
+        instance: &ash::Instance,
+        surface_instance: &ash::khr::surface::Instance,
+        surface: vk::SurfaceKHR,
+    ) -> vk::PhysicalDevice {
         let physical_devices = unsafe {
             instance
                 .enumerate_physical_devices()
@@ -255,7 +272,7 @@ impl VulkanRenderer {
 
         let mut suitable_physical_devices: Vec<vk::PhysicalDevice> = physical_devices
             .into_iter()
-            .filter(|device| Self::is_device_suitable(instance, *device))
+            .filter(|device| Self::is_device_suitable(instance, *device, surface_instance, surface))
             .collect();
         println!("Found {} suitable devices", suitable_physical_devices.len());
 
@@ -276,8 +293,13 @@ impl VulkanRenderer {
         chosen_device
     }
 
-    fn is_device_suitable(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
-        Self::find_queue_families(instance, device)
+    fn is_device_suitable(
+        instance: &ash::Instance,
+        device: vk::PhysicalDevice,
+        surface_instance: &ash::khr::surface::Instance,
+        surface: vk::SurfaceKHR,
+    ) -> bool {
+        Self::find_queue_families(instance, device, surface_instance, surface)
             .graphics_family
             .is_some()
     }
@@ -285,22 +307,31 @@ impl VulkanRenderer {
     fn find_queue_families(
         instance: &ash::Instance,
         device: vk::PhysicalDevice,
+        surface_instance: &ash::khr::surface::Instance,
+        surface: vk::SurfaceKHR,
     ) -> QueueFamilyIndices {
         let queue_family_properties =
             unsafe { instance.get_physical_device_queue_family_properties(device) };
+        let mut queue_family_indices = QueueFamilyIndices {
+            graphics_family: None,
+            presentation_family: None,
+        };
         for (idx, queue_family_property) in queue_family_properties.iter().enumerate() {
             if queue_family_property
                 .queue_flags
                 .contains(vk::QueueFlags::GRAPHICS)
             {
-                return QueueFamilyIndices {
-                    graphics_family: Some(idx as u32),
-                };
+                queue_family_indices.graphics_family = Some(idx as u32);
+            }
+            if unsafe {
+                surface_instance
+                    .get_physical_device_surface_support(device, idx as u32, surface)
+                    .expect("Host does not have enough resources or smth")
+            } {
+                queue_family_indices.presentation_family = Some(idx as u32);
             }
         }
-        QueueFamilyIndices {
-            graphics_family: None,
-        }
+        queue_family_indices
     }
 
     fn get_device_suitability_score(instance: &ash::Instance, device: vk::PhysicalDevice) -> u64 {
@@ -319,25 +350,39 @@ impl VulkanRenderer {
         instance: &ash::Instance,
         device: vk::PhysicalDevice,
         required_device_features: vk::PhysicalDeviceFeatures,
-    ) -> Result<(ash::Device, vk::Queue), Box<dyn Error>> {
-        let queue_family_indices = Self::find_queue_families(instance, device);
-        let queue_family_index = queue_family_indices.graphics_family.expect(
+        surface_instance: &ash::khr::surface::Instance,
+        surface: vk::SurfaceKHR,
+    ) -> Result<(ash::Device, vk::Queue, vk::Queue), Box<dyn Error>> {
+        let queue_family_indices =
+            Self::find_queue_families(instance, device, surface_instance, surface);
+        let graphics_q_fam_idx = queue_family_indices.graphics_family.expect(
             "Graphics Family not found! Should not be possible since we checked for suitability!",
         );
-        let device_queue_create_info = vk::DeviceQueueCreateInfo {
-            s_type: vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
-            p_next: ptr::null(),
-            queue_family_index,
-            queue_count: 1,
-            p_queue_priorities: [1.0].as_ptr(),
-            flags: vk::DeviceQueueCreateFlags::empty(),
-            ..Default::default()
-        };
+        let present_q_fam_idx = queue_family_indices.presentation_family.expect(
+            "Graphics Family not found! Should not be possible since we checked for suitability!",
+        );
+        let mut unique_queue_families = HashSet::new();
+        unique_queue_families.insert(graphics_q_fam_idx);
+        unique_queue_families.insert(present_q_fam_idx);
+        println!("Using Queue Families: {:?}", unique_queue_families);
+        let mut queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = Vec::new();
+        for queue_family_index in unique_queue_families {
+            let device_queue_create_info = vk::DeviceQueueCreateInfo {
+                s_type: vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
+                p_next: ptr::null(),
+                queue_family_index,
+                queue_count: 1,
+                p_queue_priorities: [1.0].as_ptr(),
+                flags: vk::DeviceQueueCreateFlags::empty(),
+                ..Default::default()
+            };
+            queue_create_infos.push(device_queue_create_info);
+        }
 
         let device_create_info = vk::DeviceCreateInfo {
             s_type: vk::StructureType::DEVICE_CREATE_INFO,
-            p_queue_create_infos: &device_queue_create_info,
-            queue_create_info_count: 1,
+            p_queue_create_infos: queue_create_infos.as_ptr(),
+            queue_create_info_count: queue_create_infos.len() as u32,
             p_enabled_features: &required_device_features,
             p_next: ptr::null(),
             enabled_extension_count: 0,
@@ -347,8 +392,27 @@ impl VulkanRenderer {
         };
 
         let logical_device = unsafe { instance.create_device(device, &device_create_info, None)? };
-        let device_queue = unsafe { logical_device.get_device_queue(queue_family_index, 0) };
-        Ok((logical_device, device_queue))
+        let graphics_queue = unsafe { logical_device.get_device_queue(graphics_q_fam_idx, 0) };
+        let presentation_queue = unsafe { logical_device.get_device_queue(present_q_fam_idx, 0) };
+        Ok((logical_device, graphics_queue, presentation_queue))
+    }
+
+    fn create_surface(
+        entry: &Entry,
+        instance: &ash::Instance,
+        window: &Window,
+    ) -> Result<(vk::SurfaceKHR, ash::khr::surface::Instance), Box<dyn Error>> {
+        let surface = unsafe {
+            ash_window::create_surface(
+                entry,
+                instance,
+                window.display_handle().expect("Should work").as_raw(),
+                window.window_handle().expect("Should work").as_raw(),
+                None,
+            )?
+        };
+        let surface_instance = ash::khr::surface::Instance::new(entry, instance);
+        Ok((surface, surface_instance))
     }
 
     pub fn draw(&self) {}
@@ -357,6 +421,7 @@ impl VulkanRenderer {
 
 struct QueueFamilyIndices {
     graphics_family: Option<u32>,
+    presentation_family: Option<u32>,
 }
 
 impl Drop for VulkanRenderer {
@@ -371,6 +436,9 @@ impl Drop for VulkanRenderer {
             unsafe {
                 debug_utils_instance.destroy_debug_utils_messenger(debug_utils_messenger, None)
             };
+        }
+        unsafe {
+            self.surface_instance.destroy_surface(self.surface, None);
         }
         unsafe { self.instance.destroy_instance(None) };
     }
