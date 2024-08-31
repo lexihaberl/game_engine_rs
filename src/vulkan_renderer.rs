@@ -267,7 +267,17 @@ impl VulkanRenderer {
     }
 
     fn is_device_suitable(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
-        true
+        let queue_family_properties =
+            unsafe { instance.get_physical_device_queue_family_properties(device) };
+        for queue_family_property in queue_family_properties.iter() {
+            if queue_family_property
+                .queue_flags
+                .contains(vk::QueueFlags::GRAPHICS)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     fn get_device_suitability_score(instance: &ash::Instance, device: vk::PhysicalDevice) -> u64 {
