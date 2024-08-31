@@ -257,13 +257,14 @@ impl VulkanRenderer {
             panic!("No suitable devices found!")
         }
 
-        let device_properties =
-            unsafe { instance.get_physical_device_properties(suitable_physical_devices[0]) };
+        let chosen_device = suitable_physical_devices[0];
+
+        let device_properties = unsafe { instance.get_physical_device_properties(chosen_device) };
         let device_name = device_properties
             .device_name_as_c_str()
             .expect("Should be able to convert dev name to c_str");
         println!("Choosing device {:?}", device_name);
-        suitable_physical_devices[0]
+        chosen_device
     }
 
     fn is_device_suitable(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
