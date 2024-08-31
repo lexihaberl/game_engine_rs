@@ -1,6 +1,3 @@
-use std::thread;
-use std::time;
-
 use game_engine::config;
 use game_engine::VulkanRenderer;
 use winit::application::ApplicationHandler;
@@ -12,15 +9,17 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 struct App {
-    window: Option<Window>,
     renderer: Option<VulkanRenderer>,
+    window: Option<Window>,
 }
 
 impl App {
     fn new() -> App {
         App {
-            window: None,
+            // Rust fields are dropped in order => renderer has to be dropped before window!
+            // Therefore, renderer is placed before window in the struct
             renderer: None,
+            window: None,
         }
     }
 }
@@ -55,8 +54,7 @@ impl ApplicationHandler for App {
                 WindowEvent::RedrawRequested => {
                     println!("Drawing");
                     renderer.draw();
-                    //window.pre_present_notify();
-                    thread::sleep(time::Duration::from_millis(500));
+                    window.pre_present_notify();
                     renderer.swap_buffers();
                     event_loop.exit();
                 }
