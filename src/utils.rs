@@ -1,5 +1,6 @@
 use std::ffi::c_char;
 use std::ffi::CString;
+use std::io::Read;
 
 pub fn vec_cstring_to_vec_pointers(vector: &[CString]) -> Vec<*const c_char> {
     let vec_raw: Vec<*const c_char> = vector
@@ -32,4 +33,12 @@ pub fn clamp<T: PartialOrd>(value: T, min: T, max: T) -> T {
     } else {
         value
     }
+}
+
+pub fn read_shader_file(path: &str) -> Vec<u8> {
+    std::fs::File::open(path)
+        .expect("Failed to open file {path}")
+        .bytes()
+        .map(|byte| byte.expect("Failed parsing byte code"))
+        .collect()
 }

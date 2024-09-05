@@ -52,6 +52,9 @@ pub struct VulkanRenderer {
     swapchain_image_format: vk::Format,
     swapchain_extent: vk::Extent2D,
     swapchain_image_views: Vec<vk::ImageView>,
+    render_pass: vk::RenderPass,
+    pipeline_layout: vk::PipelineLayout,
+    graphics_pipeline: vk::Pipeline,
 }
 
 impl VulkanRenderer {
@@ -92,6 +95,11 @@ impl VulkanRenderer {
         let swapchain_image_views =
             Self::create_image_views(&logical_device, swapchain_image_format, &swapchain_images);
 
+        let render_pass = Self::create_render_pass(&logical_device, swapchain_image_format);
+
+        let (pipeline_layout, graphics_pipeline) =
+            Self::create_graphics_pipeline(&logical_device, render_pass);
+
         Ok(VulkanRenderer {
             entry,
             instance,
@@ -108,6 +116,9 @@ impl VulkanRenderer {
             swapchain_image_format,
             swapchain_extent,
             swapchain_image_views,
+            render_pass,
+            pipeline_layout,
+            graphics_pipeline,
         })
     }
 
@@ -649,6 +660,266 @@ impl VulkanRenderer {
         }
         swapchain_views
     }
+
+    fn create_graphics_pipeline(
+        logical_device: &ash::Device,
+        render_pass: vk::RenderPass,
+    ) -> (vk::PipelineLayout, vk::Pipeline) {
+        let vert_shader_code = utils::read_shader_file("shaders_compiled/triangle_vert.spv");
+        let frag_shader_code = utils::read_shader_file("shaders_compiled/triangle_frag.spv");
+        println!("Vertex Shader Code len: {:?} bytes", vert_shader_code.len());
+        println!(
+            "Fragment Shader Code len: {:?} bytes",
+            frag_shader_code.len()
+        );
+        let vert_shader_module =
+            VulkanRenderer::create_shader_module(logical_device, &vert_shader_code);
+        let frag_shader_module =
+            VulkanRenderer::create_shader_module(logical_device, &frag_shader_code);
+
+        let vert_shader_stage_info = vk::PipelineShaderStageCreateInfo {
+            s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
+            stage: vk::ShaderStageFlags::VERTEX,
+            module: vert_shader_module,
+            p_name: b"main\0".as_ptr() as *const i8,
+            p_next: ptr::null(),
+            flags: vk::PipelineShaderStageCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let frag_shader_stage_info = vk::PipelineShaderStageCreateInfo {
+            s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
+            stage: vk::ShaderStageFlags::FRAGMENT,
+            module: frag_shader_module,
+            p_name: b"main\0".as_ptr() as *const i8,
+            p_next: ptr::null(),
+            flags: vk::PipelineShaderStageCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let shader_stage_infos = [vert_shader_stage_info, frag_shader_stage_info];
+
+        let dynamic_state_info = vk::PipelineDynamicStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            dynamic_state_count: config::DYNAMIC_STATE.len() as u32,
+            p_dynamic_states: config::DYNAMIC_STATE.as_ptr(),
+            p_next: ptr::null(),
+            flags: vk::PipelineDynamicStateCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let viewport_state = vk::PipelineViewportStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            viewport_count: 1,
+            p_viewports: ptr::null(),
+            scissor_count: 1,
+            p_scissors: ptr::null(),
+            p_next: ptr::null(),
+            flags: vk::PipelineViewportStateCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+            vertex_binding_description_count: 0,
+            p_vertex_binding_descriptions: ptr::null(),
+            vertex_attribute_description_count: 0,
+            p_vertex_attribute_descriptions: ptr::null(),
+            p_next: ptr::null(),
+            flags: vk::PipelineVertexInputStateCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            primitive_restart_enable: vk::FALSE,
+            p_next: ptr::null(),
+            flags: vk::PipelineInputAssemblyStateCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let rasterizer_info = vk::PipelineRasterizationStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            depth_clamp_enable: vk::FALSE,
+            rasterizer_discard_enable: vk::FALSE,
+            polygon_mode: vk::PolygonMode::FILL,
+            line_width: 1.0,
+            cull_mode: vk::CullModeFlags::BACK,
+            front_face: vk::FrontFace::CLOCKWISE,
+            depth_bias_enable: vk::FALSE,
+            depth_bias_constant_factor: 0.0,
+            depth_bias_clamp: 0.0,
+            depth_bias_slope_factor: 0.0,
+            p_next: ptr::null(),
+            flags: vk::PipelineRasterizationStateCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let multisample_info = vk::PipelineMultisampleStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            sample_shading_enable: vk::FALSE,
+            rasterization_samples: vk::SampleCountFlags::TYPE_1,
+            min_sample_shading: 1.0,
+            p_sample_mask: ptr::null(),
+            alpha_to_coverage_enable: vk::FALSE,
+            alpha_to_one_enable: vk::FALSE,
+            p_next: ptr::null(),
+            flags: vk::PipelineMultisampleStateCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState {
+            color_write_mask: vk::ColorComponentFlags::R
+                | vk::ColorComponentFlags::G
+                | vk::ColorComponentFlags::B
+                | vk::ColorComponentFlags::A,
+            blend_enable: vk::FALSE,
+            src_color_blend_factor: vk::BlendFactor::ONE,
+            dst_color_blend_factor: vk::BlendFactor::ZERO,
+            color_blend_op: vk::BlendOp::ADD,
+            src_alpha_blend_factor: vk::BlendFactor::ONE,
+            dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+            alpha_blend_op: vk::BlendOp::ADD,
+        };
+
+        let color_blending = vk::PipelineColorBlendStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            logic_op_enable: vk::FALSE,
+            logic_op: vk::LogicOp::COPY,
+            attachment_count: 1,
+            p_attachments: &color_blend_attachment,
+            blend_constants: [0.0, 0.0, 0.0, 0.0],
+            p_next: ptr::null(),
+            flags: vk::PipelineColorBlendStateCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo {
+            s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineLayoutCreateFlags::empty(),
+            set_layout_count: 0,
+            p_set_layouts: ptr::null(),
+            push_constant_range_count: 0,
+            p_push_constant_ranges: ptr::null(),
+            ..Default::default()
+        };
+
+        let pipeline_layout = unsafe {
+            logical_device
+                .create_pipeline_layout(&pipeline_layout_info, None)
+                .expect("Could not create pipeline layout")
+        };
+
+        let pipeline_info = vk::GraphicsPipelineCreateInfo {
+            s_type: vk::StructureType::GRAPHICS_PIPELINE_CREATE_INFO,
+            stage_count: shader_stage_infos.len() as u32,
+            p_stages: shader_stage_infos.as_ptr(),
+            p_vertex_input_state: &vertex_input_info,
+            p_input_assembly_state: &input_assembly_info,
+            p_viewport_state: &viewport_state,
+            p_rasterization_state: &rasterizer_info,
+            p_multisample_state: &multisample_info,
+            p_color_blend_state: &color_blending,
+            p_dynamic_state: &dynamic_state_info,
+            layout: pipeline_layout,
+            render_pass,
+            subpass: 0,
+            base_pipeline_handle: vk::Pipeline::null(),
+            base_pipeline_index: -1,
+            p_next: ptr::null(),
+            flags: vk::PipelineCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let graphics_pipeline = unsafe {
+            logical_device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .expect("Could not create graphics pipeline")
+                .first()
+                .expect("Could not get first graphics pipeline")
+                .to_owned()
+        };
+
+        unsafe {
+            logical_device.destroy_shader_module(vert_shader_module, None);
+            logical_device.destroy_shader_module(frag_shader_module, None);
+        }
+        (pipeline_layout, graphics_pipeline)
+    }
+
+    fn create_shader_module(logical_device: &ash::Device, byte_code: &[u8]) -> vk::ShaderModule {
+        let create_info = vk::ShaderModuleCreateInfo {
+            s_type: vk::StructureType::SHADER_MODULE_CREATE_INFO,
+            code_size: byte_code.len(),
+            p_code: byte_code.as_ptr() as *const u32,
+            flags: vk::ShaderModuleCreateFlags::empty(),
+            p_next: ptr::null(),
+            ..Default::default()
+        };
+        unsafe {
+            logical_device
+                .create_shader_module(&create_info, None)
+                .expect("Could not create shader module")
+        }
+    }
+
+    fn create_render_pass(
+        logical_device: &ash::Device,
+        swapchain_image_format: vk::Format,
+    ) -> vk::RenderPass {
+        let color_attachment = vk::AttachmentDescription {
+            format: swapchain_image_format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            ..Default::default()
+        };
+
+        let color_attachment_ref = vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        };
+
+        let subpass = vk::SubpassDescription {
+            pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
+            color_attachment_count: 1,
+            p_color_attachments: &color_attachment_ref,
+            p_depth_stencil_attachment: ptr::null(),
+            flags: vk::SubpassDescriptionFlags::empty(),
+            input_attachment_count: 0,
+            p_input_attachments: ptr::null(),
+            preserve_attachment_count: 0,
+            p_preserve_attachments: ptr::null(),
+            p_resolve_attachments: ptr::null(),
+            ..Default::default()
+        };
+
+        let render_pass_info = vk::RenderPassCreateInfo {
+            s_type: vk::StructureType::RENDER_PASS_CREATE_INFO,
+            attachment_count: 1,
+            p_attachments: &color_attachment,
+            subpass_count: 1,
+            p_subpasses: &subpass,
+            p_next: ptr::null(),
+            flags: vk::RenderPassCreateFlags::empty(),
+            dependency_count: 0,
+            p_dependencies: ptr::null(),
+            ..Default::default()
+        };
+
+        let render_pass = unsafe {
+            logical_device
+                .create_render_pass(&render_pass_info, None)
+                .expect("Could not create render pass")
+        };
+        render_pass
+    }
 }
 
 struct QueueFamilyIndices {
@@ -706,6 +977,16 @@ impl SwapChainSupportDetails {
 
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
+        unsafe {
+            self.logical_device
+                .destroy_pipeline(self.graphics_pipeline, None);
+            self.logical_device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+        }
+        unsafe {
+            self.logical_device
+                .destroy_render_pass(self.render_pass, None);
+        }
         for image_view in self.swapchain_image_views.iter() {
             unsafe {
                 self.logical_device.destroy_image_view(*image_view, None);
