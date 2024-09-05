@@ -46,6 +46,11 @@ pub struct VulkanRenderer {
     logical_device: ash::Device,
     graphics_queue: vk::Queue,
     presentation_queue: vk::Queue,
+    swapchain_loader: ash::khr::swapchain::Device,
+    swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<vk::Image>,
+    swapchain_image_format: vk::Format,
+    swapchain_extent: vk::Extent2D,
 }
 
 impl VulkanRenderer {
@@ -69,6 +74,19 @@ impl VulkanRenderer {
                 &surface_instance,
                 surface,
             )?;
+        let (
+            swapchain_loader,
+            swapchain,
+            swapchain_images,
+            swapchain_image_format,
+            swapchain_extent,
+        ) = Self::create_swap_chain(
+            &instance,
+            &surface_instance,
+            surface,
+            physical_device,
+            &logical_device,
+        );
         Ok(VulkanRenderer {
             entry,
             instance,
@@ -79,6 +97,11 @@ impl VulkanRenderer {
             logical_device,
             graphics_queue,
             presentation_queue,
+            swapchain_loader,
+            swapchain,
+            swapchain_images,
+            swapchain_image_format,
+            swapchain_extent,
         })
     }
 
@@ -299,7 +322,39 @@ impl VulkanRenderer {
         surface_instance: &ash::khr::surface::Instance,
         surface: vk::SurfaceKHR,
     ) -> bool {
-        Self::find_queue_families(instance, device, surface_instance, surface).is_complete()
+        let queue_families_supported =
+            Self::find_queue_families(instance, device, surface_instance, surface).is_complete();
+        let extensions_supported = Self::check_device_extension_support(instance, device);
+        let mut swapchain_adequate = false;
+        if extensions_supported {
+            let swap_chain_support =
+                SwapChainSupportDetails::query_support_details(surface_instance, surface, device);
+            swapchain_adequate = !swap_chain_support.surface_formats.is_empty()
+                && !swap_chain_support.present_modes.is_empty();
+        }
+        queue_families_supported && extensions_supported && swapchain_adequate
+    }
+
+    fn check_device_extension_support(
+        instance: &ash::Instance,
+        device: vk::PhysicalDevice,
+    ) -> bool {
+        let supported_extensions = unsafe {
+            instance
+                .enumerate_device_extension_properties(device)
+                .expect("Could not enumerate device extension properties")
+        };
+        let required_extensions = config::REQUIRED_DEVICE_EXTENSIONS;
+        let cross_section = supported_extensions.iter().filter(|extension_prop| {
+            required_extensions.contains(
+                &extension_prop
+                    .extension_name_as_c_str()
+                    .expect("Could not convert extension name to  str")
+                    .to_str()
+                    .expect("Could not convert extension name to  str"),
+            )
+        });
+        cross_section.count() == required_extensions.len()
     }
 
     fn find_queue_families(
@@ -374,14 +429,17 @@ impl VulkanRenderer {
             queue_create_infos.push(device_queue_create_info);
         }
 
+        let required_extensions = config::REQUIRED_DEVICE_EXTENSIONS;
+        let (_required_extension_names_cstr, required_extension_names_raw) =
+            utils::vec_str_ref_to_vec_pointers(&required_extensions);
         let device_create_info = vk::DeviceCreateInfo {
             s_type: vk::StructureType::DEVICE_CREATE_INFO,
             p_queue_create_infos: queue_create_infos.as_ptr(),
             queue_create_info_count: queue_create_infos.len() as u32,
             p_enabled_features: &required_device_features,
             p_next: ptr::null(),
-            enabled_extension_count: 0,
-            pp_enabled_extension_names: ptr::null(),
+            enabled_extension_count: required_extension_names_raw.len() as u32,
+            pp_enabled_extension_names: required_extension_names_raw.as_ptr(),
             flags: vk::DeviceCreateFlags::empty(),
             ..Default::default()
         };
@@ -410,6 +468,140 @@ impl VulkanRenderer {
         Ok((surface, surface_instance))
     }
 
+    fn create_swap_chain(
+        instance: &ash::Instance,
+        surface_instance: &ash::khr::surface::Instance,
+        surface: vk::SurfaceKHR,
+        device: vk::PhysicalDevice,
+        logical_device: &ash::Device,
+    ) -> (
+        ash::khr::swapchain::Device,
+        vk::SwapchainKHR,
+        Vec<vk::Image>,
+        vk::Format,
+        vk::Extent2D,
+    ) {
+        let support_details =
+            SwapChainSupportDetails::query_support_details(surface_instance, surface, device);
+
+        let surface_format =
+            VulkanRenderer::choose_swap_surface_format(&support_details.surface_formats);
+        let present_mode = VulkanRenderer::choose_swap_present_mode(&support_details.present_modes);
+        let extent = VulkanRenderer::choose_swap_extent(&support_details.capabilities);
+
+        let mut image_count = support_details.capabilities.min_image_count + 1;
+        if support_details.capabilities.max_image_count > 0 {
+            image_count = image_count.min(support_details.capabilities.max_image_count);
+        }
+
+        let queue_family_indices =
+            Self::find_queue_families(instance, device, surface_instance, surface);
+        if !queue_family_indices.is_complete() {
+            panic!("Could not find suitable queue families for swap chain creation");
+        }
+        let indices_array = [
+            queue_family_indices
+                .graphics_family
+                .expect("Should be filled since we checked for it"),
+            queue_family_indices
+                .presentation_family
+                .expect("Should be filled since we checked for it"),
+        ];
+        let (image_sharing_mode, queue_fam_index_count, p_queue_fam_indices) =
+            if queue_family_indices.graphics_family != queue_family_indices.presentation_family {
+                (vk::SharingMode::CONCURRENT, 2, indices_array.as_ptr())
+            } else {
+                (vk::SharingMode::EXCLUSIVE, 0, ptr::null())
+            };
+
+        let create_info = vk::SwapchainCreateInfoKHR {
+            s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
+            surface,
+            min_image_count: image_count,
+            image_format: surface_format.format,
+            image_color_space: surface_format.color_space,
+            image_extent: extent,
+            image_array_layers: 1,
+            image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            image_sharing_mode,
+            queue_family_index_count: queue_fam_index_count,
+            p_queue_family_indices: p_queue_fam_indices,
+            pre_transform: support_details.capabilities.current_transform,
+            composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
+            present_mode,
+            clipped: vk::TRUE,
+            old_swapchain: vk::SwapchainKHR::null(),
+            p_next: ptr::null(),
+            flags: vk::SwapchainCreateFlagsKHR::empty(),
+            ..Default::default()
+        };
+
+        let swapchain_loader = ash::khr::swapchain::Device::new(instance, logical_device);
+        let swapchain = unsafe {
+            swapchain_loader
+                .create_swapchain(&create_info, None)
+                .expect("Could not create swapchain")
+        };
+        let swapchain_images = unsafe {
+            swapchain_loader
+                .get_swapchain_images(swapchain)
+                .expect("Could not get swapchain images")
+        };
+
+        (
+            swapchain_loader,
+            swapchain,
+            swapchain_images,
+            surface_format.format,
+            extent,
+        )
+    }
+
+    fn choose_swap_surface_format(
+        available_formats: &[vk::SurfaceFormatKHR],
+    ) -> vk::SurfaceFormatKHR {
+        let desired_format = available_formats.iter().find(|format| {
+            format.format == vk::Format::B8G8R8_SRGB
+                && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+        });
+        match desired_format {
+            Some(format) => *format,
+            None => *available_formats.first().expect("Should not be empty, since we already got so far in swap chain process, so we expect some format to be available"),
+        }
+    }
+
+    fn choose_swap_present_mode(
+        available_present_modes: &[vk::PresentModeKHR],
+    ) -> vk::PresentModeKHR {
+        let desired_mode = available_present_modes
+            .iter()
+            .find(|mode| **mode == vk::PresentModeKHR::MAILBOX);
+        match desired_mode {
+            Some(mode) => *mode,
+            // FIFO is guaranteed to be available
+            None => vk::PresentModeKHR::FIFO,
+        }
+    }
+
+    fn choose_swap_extent(capabilities: &vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
+        if capabilities.current_extent.width != u32::MAX {
+            capabilities.current_extent
+        } else {
+            vk::Extent2D {
+                width: utils::clamp(
+                    config::WINDOW_WIDTH as u32,
+                    capabilities.min_image_extent.width,
+                    capabilities.max_image_extent.width,
+                ),
+                height: utils::clamp(
+                    config::WINDOW_HEIGHT as u32,
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
+            }
+        }
+    }
+
     pub fn draw(&self) {}
     pub fn swap_buffers(&self) {}
 }
@@ -431,8 +623,49 @@ impl QueueFamilyIndices {
     }
 }
 
+#[derive(Debug)]
+struct SwapChainSupportDetails {
+    capabilities: vk::SurfaceCapabilitiesKHR,
+    surface_formats: Vec<vk::SurfaceFormatKHR>,
+    present_modes: Vec<vk::PresentModeKHR>,
+}
+
+impl SwapChainSupportDetails {
+    fn query_support_details(
+        surface_instance: &ash::khr::surface::Instance,
+        surface: vk::SurfaceKHR,
+        device: vk::PhysicalDevice,
+    ) -> SwapChainSupportDetails {
+        let capabilities = unsafe {
+            surface_instance
+                .get_physical_device_surface_capabilities(device, surface)
+                .expect("Could not get surface capabilities")
+        };
+        let surface_formats = unsafe {
+            surface_instance
+                .get_physical_device_surface_formats(device, surface)
+                .expect("Could not get surface formats")
+        };
+        let present_modes = unsafe {
+            surface_instance
+                .get_physical_device_surface_present_modes(device, surface)
+                .expect("Could not get present modes")
+        };
+        SwapChainSupportDetails {
+            capabilities,
+            surface_formats,
+            present_modes,
+        }
+    }
+}
+
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
+        unsafe {
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
+        }
+
         unsafe {
             self.logical_device.destroy_device(None);
         }
