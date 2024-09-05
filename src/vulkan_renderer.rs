@@ -51,6 +51,7 @@ pub struct VulkanRenderer {
     swapchain_images: Vec<vk::Image>,
     swapchain_image_format: vk::Format,
     swapchain_extent: vk::Extent2D,
+    swapchain_image_views: Vec<vk::ImageView>,
 }
 
 impl VulkanRenderer {
@@ -87,6 +88,10 @@ impl VulkanRenderer {
             physical_device,
             &logical_device,
         );
+
+        let swapchain_image_views =
+            Self::create_image_views(&logical_device, swapchain_image_format, &swapchain_images);
+
         Ok(VulkanRenderer {
             entry,
             instance,
@@ -102,6 +107,7 @@ impl VulkanRenderer {
             swapchain_images,
             swapchain_image_format,
             swapchain_extent,
+            swapchain_image_views,
         })
     }
 
@@ -604,6 +610,45 @@ impl VulkanRenderer {
 
     pub fn draw(&self) {}
     pub fn swap_buffers(&self) {}
+
+    fn create_image_views(
+        device: &ash::Device,
+        format: vk::Format,
+        swapchain_images: &[vk::Image],
+    ) -> Vec<vk::ImageView> {
+        let mut swapchain_views: Vec<vk::ImageView> = Vec::with_capacity(swapchain_images.len());
+        for image in swapchain_images.iter() {
+            let create_info = vk::ImageViewCreateInfo {
+                s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
+                image: *image,
+                view_type: vk::ImageViewType::TYPE_2D,
+                format,
+                components: vk::ComponentMapping {
+                    r: vk::ComponentSwizzle::IDENTITY,
+                    g: vk::ComponentSwizzle::IDENTITY,
+                    b: vk::ComponentSwizzle::IDENTITY,
+                    a: vk::ComponentSwizzle::IDENTITY,
+                },
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                p_next: ptr::null(),
+                flags: vk::ImageViewCreateFlags::empty(),
+                ..Default::default()
+            };
+            let image_view = unsafe {
+                device
+                    .create_image_view(&create_info, None)
+                    .expect("Could not create image view")
+            };
+            swapchain_views.push(image_view);
+        }
+        swapchain_views
+    }
 }
 
 struct QueueFamilyIndices {
@@ -661,6 +706,12 @@ impl SwapChainSupportDetails {
 
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
+        for image_view in self.swapchain_image_views.iter() {
+            unsafe {
+                self.logical_device.destroy_image_view(*image_view, None);
+            }
+        }
+
         unsafe {
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
