@@ -46,17 +46,15 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         if let (Some(renderer), Some(window)) = (&self.renderer, &self.window) {
+            let mut exit = false;
             match event {
                 WindowEvent::CloseRequested => {
                     println!("The close button was pressed; stopping");
-                    event_loop.exit();
+                    exit = true;
                 }
                 WindowEvent::RedrawRequested => {
-                    println!("Drawing");
-                    renderer.draw();
                     window.pre_present_notify();
-                    renderer.swap_buffers();
-                    event_loop.exit();
+                    renderer.draw();
                 }
                 WindowEvent::KeyboardInput {
                     event:
@@ -69,7 +67,7 @@ impl ApplicationHandler for App {
                 } => match key {
                     PhysicalKey::Code(KeyCode::Escape) => {
                         println!("Escape was pressed; Closing window");
-                        event_loop.exit();
+                        exit = true;
                     }
                     PhysicalKey::Code(KeyCode::KeyW) => {
                         println!("Pressing W")
@@ -77,6 +75,10 @@ impl ApplicationHandler for App {
                     _ => println!("Something else was pressed"),
                 },
                 _ => (),
+            }
+            if exit {
+                event_loop.exit();
+                renderer.wait_idle();
             }
         }
     }
