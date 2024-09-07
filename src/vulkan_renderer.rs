@@ -55,6 +55,9 @@ pub struct VulkanRenderer {
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
+    swapchain_framebuffers: Vec<vk::Framebuffer>,
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
 }
 
 impl VulkanRenderer {
@@ -100,6 +103,23 @@ impl VulkanRenderer {
         let (pipeline_layout, graphics_pipeline) =
             Self::create_graphics_pipeline(&logical_device, render_pass);
 
+        let swapchain_framebuffers = Self::create_framebuffers(
+            &logical_device,
+            &swapchain_image_views,
+            render_pass,
+            swapchain_extent,
+        );
+
+        let command_pool = Self::create_command_pool(
+            &instance,
+            &logical_device,
+            physical_device,
+            surface,
+            &surface_instance,
+        );
+
+        let command_buffer = Self::create_command_buffer(&logical_device, command_pool);
+
         Ok(VulkanRenderer {
             entry,
             instance,
@@ -119,6 +139,9 @@ impl VulkanRenderer {
             render_pass,
             pipeline_layout,
             graphics_pipeline,
+            swapchain_framebuffers,
+            command_pool,
+            command_buffer,
         })
     }
 
@@ -920,6 +943,159 @@ impl VulkanRenderer {
         };
         render_pass
     }
+
+    fn create_framebuffers(
+        logical_device: &ash::Device,
+        swapchain_image_views: &[vk::ImageView],
+        render_pass: vk::RenderPass,
+        swapchain_extent: vk::Extent2D,
+    ) -> Vec<vk::Framebuffer> {
+        let mut swapchain_frame_buffers = Vec::with_capacity(swapchain_image_views.len());
+
+        for image_view in swapchain_image_views.iter() {
+            let attachments = [*image_view];
+            let framebuffer_info = vk::FramebufferCreateInfo {
+                s_type: vk::StructureType::FRAMEBUFFER_CREATE_INFO,
+                render_pass,
+                attachment_count: attachments.len() as u32,
+                p_attachments: attachments.as_ptr(),
+                width: swapchain_extent.width,
+                height: swapchain_extent.height,
+                layers: 1,
+                p_next: ptr::null(),
+                flags: vk::FramebufferCreateFlags::empty(),
+                ..Default::default()
+            };
+            let framebuffer = unsafe {
+                logical_device
+                    .create_framebuffer(&framebuffer_info, None)
+                    .expect("Could not create framebuffer")
+            };
+            swapchain_frame_buffers.push(framebuffer);
+        }
+        swapchain_frame_buffers
+    }
+
+    fn create_command_pool(
+        instance: &ash::Instance,
+        logical_device: &ash::Device,
+        physical_device: vk::PhysicalDevice,
+        surface: vk::SurfaceKHR,
+        surface_instance: &ash::khr::surface::Instance,
+    ) -> vk::CommandPool {
+        let queue_family_indices =
+            Self::find_queue_families(instance, physical_device, surface_instance, surface);
+        let pool_info = vk::CommandPoolCreateInfo {
+            s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
+            queue_family_index: queue_family_indices.graphics_family.unwrap(),
+            flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            p_next: ptr::null(),
+            ..Default::default()
+        };
+        unsafe {
+            logical_device
+                .create_command_pool(&pool_info, None)
+                .expect("Could not create command pool")
+        }
+    }
+
+    fn create_command_buffer(
+        logical_device: &ash::Device,
+        command_pool: vk::CommandPool,
+    ) -> vk::CommandBuffer {
+        let alloc_info = vk::CommandBufferAllocateInfo {
+            s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
+            command_pool,
+            level: vk::CommandBufferLevel::PRIMARY,
+            command_buffer_count: 1,
+            p_next: ptr::null(),
+            ..Default::default()
+        };
+        let command_buffer = unsafe {
+            logical_device
+                .allocate_command_buffers(&alloc_info)
+                .expect("Could not allocate command buffers")
+        };
+        command_buffer
+            .first()
+            .expect("Could not get first command buffer")
+            .to_owned()
+    }
+
+    fn record_command_buffer(
+        logical_device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        render_pass: vk::RenderPass,
+        swapchain_framebuffers: Vec<vk::Framebuffer>,
+        image_index: usize,
+        extent: vk::Extent2D,
+        graphics_pipeline: vk::Pipeline,
+    ) {
+        let begin_info = vk::CommandBufferBeginInfo {
+            s_type: vk::StructureType::COMMAND_BUFFER_BEGIN_INFO,
+            p_next: ptr::null(),
+            flags: vk::CommandBufferUsageFlags::empty(),
+            p_inheritance_info: ptr::null(),
+            ..Default::default()
+        };
+        unsafe {
+            logical_device
+                .begin_command_buffer(command_buffer, &begin_info)
+                .expect("Could not begin command buffer");
+        }
+        let clear_color = vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 1.0],
+            },
+        };
+        let renderpass_begin_info = vk::RenderPassBeginInfo {
+            s_type: vk::StructureType::RENDER_PASS_BEGIN_INFO,
+            render_pass,
+            framebuffer: swapchain_framebuffers[image_index],
+            render_area: vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent,
+            },
+            clear_value_count: 1,
+            p_clear_values: &clear_color,
+            p_next: ptr::null(),
+            ..Default::default()
+        };
+        unsafe {
+            logical_device.cmd_begin_render_pass(
+                command_buffer,
+                &renderpass_begin_info,
+                vk::SubpassContents::INLINE,
+            );
+            logical_device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                graphics_pipeline,
+            )
+        }
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: extent.width as f32,
+            height: extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent,
+        };
+
+        unsafe {
+            logical_device.cmd_set_viewport(command_buffer, 0, &[viewport]);
+            logical_device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+            logical_device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            logical_device.cmd_end_render_pass(command_buffer);
+            logical_device
+                .end_command_buffer(command_buffer)
+                .expect("Failed to record command buffer");
+        }
+    }
 }
 
 struct QueueFamilyIndices {
@@ -978,6 +1154,11 @@ impl SwapChainSupportDetails {
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
         unsafe {
+            self.logical_device
+                .destroy_command_pool(self.command_pool, None);
+            for framebuffer in self.swapchain_framebuffers.iter() {
+                self.logical_device.destroy_framebuffer(*framebuffer, None);
+            }
             self.logical_device
                 .destroy_pipeline(self.graphics_pipeline, None);
             self.logical_device
