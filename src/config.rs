@@ -11,3 +11,4 @@ pub const VALIDATION_LAYERS: [&str; 1] = ["VK_LAYER_KHRONOS_validation"];
 pub const REQUIRED_DEVICE_EXTENSIONS: [&str; 1] = ["VK_KHR_swapchain"];
 pub const DYNAMIC_STATE: [vk::DynamicState; 2] =
     [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+pub const MAX_FRAMES_IN_FLIGHT: usize = 2;

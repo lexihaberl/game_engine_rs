@@ -57,10 +57,11 @@ pub struct VulkanRenderer {
     graphics_pipeline: vk::Pipeline,
     swapchain_framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-    image_available_semaphore: vk::Semaphore,
-    render_finished_semaphore: vk::Semaphore,
-    in_flight_fence: vk::Fence,
+    command_buffers: Vec<vk::CommandBuffer>,
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    in_flight_fences: Vec<vk::Fence>,
+    current_frame: usize,
 }
 
 impl VulkanRenderer {
@@ -121,9 +122,9 @@ impl VulkanRenderer {
             &surface_instance,
         );
 
-        let command_buffer = Self::create_command_buffer(&logical_device, command_pool);
+        let command_buffers = Self::create_command_buffers(&logical_device, command_pool);
 
-        let (image_available_semaphore, render_finished_semaphore, in_flight_fence) =
+        let (image_available_semaphores, render_finished_semaphores, in_flight_fences) =
             Self::create_sync_objects(&logical_device);
 
         Ok(VulkanRenderer {
@@ -147,10 +148,11 @@ impl VulkanRenderer {
             graphics_pipeline,
             swapchain_framebuffers,
             command_pool,
-            command_buffer,
-            image_available_semaphore,
-            render_finished_semaphore,
-            in_flight_fence,
+            command_buffers,
+            image_available_semaphores,
+            render_finished_semaphores,
+            in_flight_fences,
+            current_frame: 0,
         })
     }
 
@@ -651,31 +653,37 @@ impl VulkanRenderer {
         }
     }
 
-    pub fn draw(&self) {
+    pub fn draw(&mut self) {
         let image_index = unsafe {
             self.logical_device
-                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .wait_for_fences(&[self.in_flight_fences[self.current_frame]], true, u64::MAX)
                 .expect("Could not wait for fences");
             self.logical_device
-                .reset_fences(&[self.in_flight_fence])
+                .reset_fences(&[self.in_flight_fences[self.current_frame]])
                 .expect("Could not reset fences");
             let (image_index, _is_suboptimal_surface) = self
                 .swapchain_loader
                 .acquire_next_image(
                     self.swapchain,
                     u64::MAX,
-                    self.image_available_semaphore,
+                    self.image_available_semaphores[self.current_frame],
                     vk::Fence::null(),
                 )
                 .expect("Could not acquire next image");
             self.logical_device
-                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .reset_command_buffer(
+                    self.command_buffers[self.current_frame],
+                    vk::CommandBufferResetFlags::empty(),
+                )
                 .expect("Could not reset command buffer");
-            self.record_command_buffer(self.command_buffer, image_index as usize);
+            self.record_command_buffer(
+                self.command_buffers[self.current_frame],
+                image_index as usize,
+            );
             image_index
         };
 
-        let wait_semaphores = [self.image_available_semaphore];
+        let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let queue_submit_info = vk::SubmitInfo {
             s_type: vk::StructureType::SUBMIT_INFO,
@@ -683,10 +691,10 @@ impl VulkanRenderer {
             p_wait_semaphores: wait_semaphores.as_ptr(),
             p_wait_dst_stage_mask: wait_stages.as_ptr(),
             command_buffer_count: 1,
-            p_command_buffers: &self.command_buffer,
+            p_command_buffers: &self.command_buffers[self.current_frame],
             signal_semaphore_count: 1,
             p_next: ptr::null(),
-            p_signal_semaphores: &self.render_finished_semaphore,
+            p_signal_semaphores: &self.render_finished_semaphores[self.current_frame],
             ..Default::default()
         };
 
@@ -695,7 +703,7 @@ impl VulkanRenderer {
                 .queue_submit(
                     self.graphics_queue,
                     &[queue_submit_info],
-                    self.in_flight_fence,
+                    self.in_flight_fences[self.current_frame],
                 )
                 .expect("Could not submit queue");
         }
@@ -704,7 +712,7 @@ impl VulkanRenderer {
             s_type: vk::StructureType::PRESENT_INFO_KHR,
             p_next: ptr::null(),
             wait_semaphore_count: 1,
-            p_wait_semaphores: &self.render_finished_semaphore,
+            p_wait_semaphores: &self.render_finished_semaphores[self.current_frame],
             swapchain_count: 1,
             p_swapchains: &self.swapchain,
             p_image_indices: &image_index,
@@ -717,6 +725,7 @@ impl VulkanRenderer {
                 .queue_present(self.presentation_queue, &present_info)
                 .expect("Could not present queue");
         }
+        self.current_frame = (self.current_frame + 1) % config::MAX_FRAMES_IN_FLIGHT;
     }
     pub fn swap_buffers(&self) {}
 
@@ -1084,27 +1093,24 @@ impl VulkanRenderer {
         }
     }
 
-    fn create_command_buffer(
+    fn create_command_buffers(
         logical_device: &ash::Device,
         command_pool: vk::CommandPool,
-    ) -> vk::CommandBuffer {
+    ) -> Vec<vk::CommandBuffer> {
         let alloc_info = vk::CommandBufferAllocateInfo {
             s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
             command_pool,
             level: vk::CommandBufferLevel::PRIMARY,
-            command_buffer_count: 1,
+            command_buffer_count: config::MAX_FRAMES_IN_FLIGHT as u32,
             p_next: ptr::null(),
             ..Default::default()
         };
-        let command_buffer = unsafe {
+        let command_buffers = unsafe {
             logical_device
                 .allocate_command_buffers(&alloc_info)
                 .expect("Could not allocate command buffers")
         };
-        command_buffer
-            .first()
-            .expect("Could not get first command buffer")
-            .to_owned()
+        command_buffers
     }
 
     fn record_command_buffer(&self, command_buffer: vk::CommandBuffer, image_index: usize) {
@@ -1186,7 +1192,7 @@ impl VulkanRenderer {
 
     fn create_sync_objects(
         logical_device: &ash::Device,
-    ) -> (vk::Semaphore, vk::Semaphore, vk::Fence) {
+    ) -> (Vec<vk::Semaphore>, Vec<vk::Semaphore>, Vec<vk::Fence>) {
         let semaphore_create_info = vk::SemaphoreCreateInfo {
             s_type: vk::StructureType::SEMAPHORE_CREATE_INFO,
             p_next: ptr::null(),
@@ -1200,26 +1206,35 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let image_available_semaphore = unsafe {
-            logical_device
-                .create_semaphore(&semaphore_create_info, None)
-                .expect("Could not create semaphore")
-        };
-        let render_finished_semaphore = unsafe {
-            logical_device
-                .create_semaphore(&semaphore_create_info, None)
-                .expect("Could not create semaphore")
-        };
-        let in_flight_fence = unsafe {
-            logical_device
-                .create_fence(&fence_create_info, None)
-                .expect("Could not create fence")
-        };
+        let mut image_available_semaphores = Vec::with_capacity(config::MAX_FRAMES_IN_FLIGHT);
+        let mut render_finished_semaphores = Vec::with_capacity(config::MAX_FRAMES_IN_FLIGHT);
+        let mut in_flight_fences = Vec::with_capacity(config::MAX_FRAMES_IN_FLIGHT);
+
+        for _frame in 0..config::MAX_FRAMES_IN_FLIGHT {
+            let image_available_semaphore = unsafe {
+                logical_device
+                    .create_semaphore(&semaphore_create_info, None)
+                    .expect("Could not create semaphore")
+            };
+            let render_finished_semaphore = unsafe {
+                logical_device
+                    .create_semaphore(&semaphore_create_info, None)
+                    .expect("Could not create semaphore")
+            };
+            let in_flight_fence = unsafe {
+                logical_device
+                    .create_fence(&fence_create_info, None)
+                    .expect("Could not create fence")
+            };
+            image_available_semaphores.push(image_available_semaphore);
+            render_finished_semaphores.push(render_finished_semaphore);
+            in_flight_fences.push(in_flight_fence);
+        }
 
         (
-            image_available_semaphore,
-            render_finished_semaphore,
-            in_flight_fence,
+            image_available_semaphores,
+            render_finished_semaphores,
+            in_flight_fences,
         )
     }
 }
@@ -1280,12 +1295,15 @@ impl SwapChainSupportDetails {
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
         unsafe {
-            self.logical_device
-                .destroy_semaphore(self.render_finished_semaphore, None);
-            self.logical_device
-                .destroy_semaphore(self.image_available_semaphore, None);
-            self.logical_device
-                .destroy_fence(self.in_flight_fence, None);
+            for semaphore in self.image_available_semaphores.iter() {
+                self.logical_device.destroy_semaphore(*semaphore, None);
+            }
+            for semaphore in self.render_finished_semaphores.iter() {
+                self.logical_device.destroy_semaphore(*semaphore, None);
+            }
+            for fence in self.in_flight_fences.iter() {
+                self.logical_device.destroy_fence(*fence, None);
+            }
             self.logical_device
                 .destroy_command_pool(self.command_pool, None);
             for framebuffer in self.swapchain_framebuffers.iter() {

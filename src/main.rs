@@ -11,6 +11,7 @@ use winit::window::{Window, WindowId};
 struct App {
     renderer: Option<VulkanRenderer>,
     window: Option<Window>,
+    last_frame: std::time::Instant,
 }
 
 impl App {
@@ -20,6 +21,7 @@ impl App {
             // Therefore, renderer is placed before window in the struct
             renderer: None,
             window: None,
+            last_frame: std::time::Instant::now(),
         }
     }
 }
@@ -45,7 +47,7 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        if let (Some(renderer), Some(window)) = (&self.renderer, &self.window) {
+        if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
             let mut exit = false;
             match event {
                 WindowEvent::CloseRequested => {
@@ -53,6 +55,7 @@ impl ApplicationHandler for App {
                     exit = true;
                 }
                 WindowEvent::RedrawRequested => {
+                    self.last_frame = std::time::Instant::now();
                     window.pre_present_notify();
                     renderer.draw();
                 }
