@@ -1030,12 +1030,11 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let render_pass = unsafe {
+        unsafe {
             logical_device
                 .create_render_pass(&render_pass_info, None)
                 .expect("Could not create render pass")
-        };
-        render_pass
+        }
     }
 
     fn create_framebuffers(
@@ -1105,12 +1104,11 @@ impl VulkanRenderer {
             p_next: ptr::null(),
             ..Default::default()
         };
-        let command_buffers = unsafe {
+        unsafe {
             logical_device
                 .allocate_command_buffers(&alloc_info)
                 .expect("Could not allocate command buffers")
-        };
-        command_buffers
+        }
     }
 
     fn record_command_buffer(&self, command_buffer: vk::CommandBuffer, image_index: usize) {
