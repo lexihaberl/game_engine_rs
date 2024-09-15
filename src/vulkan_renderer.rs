@@ -2,7 +2,7 @@ use crate::config;
 use crate::utils;
 use ash::ext::debug_utils;
 use ash::{vk, Entry};
-use core::panic;
+use core::mem::offset_of;
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::error::Error;
@@ -36,6 +36,53 @@ unsafe extern "system" fn vulkan_debug_callback(
     println!("[VK_Debug]{}{}{:?}", severity, types, message);
     vk::FALSE
 }
+
+#[repr(C)]
+struct Vertex {
+    pos: [f32; 2],
+    color: [f32; 3],
+}
+
+impl Vertex {
+    pub fn get_binding_description() -> [vk::VertexInputBindingDescription; 1] {
+        [vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: std::mem::size_of::<Vertex>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }]
+    }
+    pub fn get_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
+        [
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: 0,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: offset_of!(Vertex, color) as u32,
+            },
+        ]
+    }
+}
+
+const VERTICES: [Vertex; 3] = [
+    Vertex {
+        pos: [0.0, -0.5],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        pos: [0.5, 0.5],
+        color: [0.0, 1.0, 0.0],
+    },
+    Vertex {
+        pos: [-0.5, 0.5],
+        color: [0.0, 0.0, 1.0],
+    },
+];
 
 pub struct VulkanRenderer {
     entry: Entry, //we aren't allowed to call any Vulkan functions after entry is dropped!
@@ -845,12 +892,14 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
+        let binding_description = Vertex::get_binding_description();
+        let attribute_descriptions = Vertex::get_attribute_descriptions();
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-            vertex_binding_description_count: 0,
-            p_vertex_binding_descriptions: ptr::null(),
-            vertex_attribute_description_count: 0,
-            p_vertex_attribute_descriptions: ptr::null(),
+            vertex_binding_description_count: binding_description.len() as u32,
+            p_vertex_binding_descriptions: binding_description.as_ptr(),
+            vertex_attribute_description_count: attribute_descriptions.len() as u32,
+            p_vertex_attribute_descriptions: attribute_descriptions.as_ptr(),
             p_next: ptr::null(),
             flags: vk::PipelineVertexInputStateCreateFlags::empty(),
             ..Default::default()
