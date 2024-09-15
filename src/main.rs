@@ -57,7 +57,10 @@ impl ApplicationHandler for App {
                 WindowEvent::RedrawRequested => {
                     self.last_frame = std::time::Instant::now();
                     window.pre_present_notify();
-                    renderer.draw();
+                    renderer.draw(window);
+                }
+                WindowEvent::Resized(physical_size) => {
+                    renderer.recreate_swapchain(physical_size.to_logical(window.scale_factor()));
                 }
                 WindowEvent::KeyboardInput {
                     event:

@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
+use winit::dpi::LogicalSize;
 use winit::raw_window_handle::HasDisplayHandle;
 use winit::raw_window_handle::HasWindowHandle;
 use winit::window::Window;
@@ -97,6 +98,7 @@ impl VulkanRenderer {
             surface,
             physical_device,
             &logical_device,
+            window.inner_size().to_logical(window.scale_factor()),
         );
 
         let swapchain_image_views =
@@ -525,6 +527,7 @@ impl VulkanRenderer {
         surface: vk::SurfaceKHR,
         device: vk::PhysicalDevice,
         logical_device: &ash::Device,
+        window_size: LogicalSize<u32>,
     ) -> (
         ash::khr::swapchain::Device,
         vk::SwapchainKHR,
@@ -538,7 +541,7 @@ impl VulkanRenderer {
         let surface_format =
             VulkanRenderer::choose_swap_surface_format(&support_details.surface_formats);
         let present_mode = VulkanRenderer::choose_swap_present_mode(&support_details.present_modes);
-        let extent = VulkanRenderer::choose_swap_extent(&support_details.capabilities);
+        let extent = VulkanRenderer::choose_swap_extent(&support_details.capabilities, window_size);
 
         let mut image_count = support_details.capabilities.min_image_count + 1;
         if support_details.capabilities.max_image_count > 0 {
@@ -634,18 +637,21 @@ impl VulkanRenderer {
         }
     }
 
-    fn choose_swap_extent(capabilities: &vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
+    fn choose_swap_extent(
+        capabilities: &vk::SurfaceCapabilitiesKHR,
+        window_size: LogicalSize<u32>,
+    ) -> vk::Extent2D {
         if capabilities.current_extent.width != u32::MAX {
             capabilities.current_extent
         } else {
             vk::Extent2D {
                 width: utils::clamp(
-                    config::WINDOW_WIDTH as u32,
+                    window_size.width,
                     capabilities.min_image_extent.width,
                     capabilities.max_image_extent.width,
                 ),
                 height: utils::clamp(
-                    config::WINDOW_HEIGHT as u32,
+                    window_size.height,
                     capabilities.min_image_extent.height,
                     capabilities.max_image_extent.height,
                 ),
@@ -653,23 +659,29 @@ impl VulkanRenderer {
         }
     }
 
-    pub fn draw(&mut self) {
+    pub fn draw(&mut self, window: &Window) {
         let image_index = unsafe {
             self.logical_device
                 .wait_for_fences(&[self.in_flight_fences[self.current_frame]], true, u64::MAX)
                 .expect("Could not wait for fences");
+            let result = self.swapchain_loader.acquire_next_image(
+                self.swapchain,
+                u64::MAX,
+                self.image_available_semaphores[self.current_frame],
+                vk::Fence::null(),
+            );
+
+            let image_index = match result {
+                Ok((image_index, _is_surface_suboptimal)) => image_index,
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    self.recreate_swapchain(window.inner_size().to_logical(window.scale_factor()));
+                    return;
+                }
+                _ => panic!("Could not acquire next image"),
+            };
             self.logical_device
                 .reset_fences(&[self.in_flight_fences[self.current_frame]])
                 .expect("Could not reset fences");
-            let (image_index, _is_suboptimal_surface) = self
-                .swapchain_loader
-                .acquire_next_image(
-                    self.swapchain,
-                    u64::MAX,
-                    self.image_available_semaphores[self.current_frame],
-                    vk::Fence::null(),
-                )
-                .expect("Could not acquire next image");
             self.logical_device
                 .reset_command_buffer(
                     self.command_buffers[self.current_frame],
@@ -720,10 +732,17 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        unsafe {
+        let result = unsafe {
             self.swapchain_loader
                 .queue_present(self.presentation_queue, &present_info)
-                .expect("Could not present queue");
+        };
+        match result {
+            // bool indicates whether the surface is suboptimal
+            Ok(false) => {}
+            Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                self.recreate_swapchain(window.inner_size().to_logical(window.scale_factor()));
+            }
+            _ => panic!("Could not present queue"),
         }
         self.current_frame = (self.current_frame + 1) % config::MAX_FRAMES_IN_FLIGHT;
     }
@@ -1235,6 +1254,67 @@ impl VulkanRenderer {
             in_flight_fences,
         )
     }
+
+    pub fn recreate_swapchain(&mut self, window_size: LogicalSize<u32>) {
+        self.wait_idle();
+
+        self.cleanup_swapchain();
+
+        let (
+            swapchain_loader,
+            swapchain,
+            swapchain_images,
+            swapchain_image_format,
+            swapchain_extent,
+        ) = VulkanRenderer::create_swap_chain(
+            &self.instance,
+            &self.surface_instance,
+            self.surface,
+            self.physical_device,
+            &self.logical_device,
+            window_size,
+        );
+
+        let swapchain_image_views = VulkanRenderer::create_image_views(
+            &self.logical_device,
+            swapchain_image_format,
+            &swapchain_images,
+        );
+
+        let render_pass =
+            VulkanRenderer::create_render_pass(&self.logical_device, swapchain_image_format);
+
+        let framebuffers = VulkanRenderer::create_framebuffers(
+            &self.logical_device,
+            &swapchain_image_views,
+            render_pass,
+            swapchain_extent,
+        );
+
+        self.swapchain_loader = swapchain_loader;
+        self.swapchain = swapchain;
+        self.swapchain_images = swapchain_images;
+        self.swapchain_image_format = swapchain_image_format;
+        self.swapchain_extent = swapchain_extent;
+        self.swapchain_image_views = swapchain_image_views;
+        self.render_pass = render_pass;
+        self.swapchain_framebuffers = framebuffers;
+    }
+
+    fn cleanup_swapchain(&self) {
+        unsafe {
+            for framebuffer in self.swapchain_framebuffers.iter() {
+                self.logical_device.destroy_framebuffer(*framebuffer, None);
+            }
+            self.logical_device
+                .destroy_render_pass(self.render_pass, None);
+            for image_view in self.swapchain_image_views.iter() {
+                self.logical_device.destroy_image_view(*image_view, None);
+            }
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
+        }
+    }
 }
 
 struct QueueFamilyIndices {
@@ -1292,6 +1372,8 @@ impl SwapChainSupportDetails {
 
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
+        self.wait_idle();
+        self.cleanup_swapchain();
         unsafe {
             for semaphore in self.image_available_semaphores.iter() {
                 self.logical_device.destroy_semaphore(*semaphore, None);
@@ -1304,27 +1386,10 @@ impl Drop for VulkanRenderer {
             }
             self.logical_device
                 .destroy_command_pool(self.command_pool, None);
-            for framebuffer in self.swapchain_framebuffers.iter() {
-                self.logical_device.destroy_framebuffer(*framebuffer, None);
-            }
             self.logical_device
                 .destroy_pipeline(self.graphics_pipeline, None);
             self.logical_device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-        }
-        unsafe {
-            self.logical_device
-                .destroy_render_pass(self.render_pass, None);
-        }
-        for image_view in self.swapchain_image_views.iter() {
-            unsafe {
-                self.logical_device.destroy_image_view(*image_view, None);
-            }
-        }
-
-        unsafe {
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain, None);
         }
 
         unsafe {
