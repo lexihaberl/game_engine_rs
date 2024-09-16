@@ -3,11 +3,13 @@ use crate::utils;
 use ash::ext::debug_utils;
 use ash::{vk, Entry};
 use core::mem::offset_of;
+use nalgebra_glm as glm;
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::error::Error;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
+use std::time;
 use winit::dpi::LogicalSize;
 use winit::raw_window_handle::HasDisplayHandle;
 use winit::raw_window_handle::HasWindowHandle;
@@ -103,6 +105,14 @@ const VERTICES: [Vertex; 4] = [
     },
 ];
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+struct UniformBufferObject {
+    model: glm::Mat4,
+    view: glm::Mat4,
+    proj: glm::Mat4,
+}
+
 const INDICES: [u32; 6] = [0, 1, 2, 2, 3, 0];
 
 pub struct VulkanRenderer {
@@ -122,6 +132,7 @@ pub struct VulkanRenderer {
     swapchain_extent: vk::Extent2D,
     swapchain_image_views: Vec<vk::ImageView>,
     render_pass: vk::RenderPass,
+    descriptor_set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
     swapchain_framebuffers: Vec<vk::Framebuffer>,
@@ -135,10 +146,17 @@ pub struct VulkanRenderer {
     vertex_buffer_memory: vk::DeviceMemory,
     index_buffer: vk::Buffer,
     index_buffer_memory: vk::DeviceMemory,
+    uniform_buffers: Vec<vk::Buffer>,
+    uniform_buffers_memory: Vec<vk::DeviceMemory>,
+    uniform_buffers_mapped: Vec<*mut UniformBufferObject>,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
+    start_time: time::Instant,
 }
 
 impl VulkanRenderer {
     pub fn new(window: &Window) -> Result<VulkanRenderer, Box<dyn Error>> {
+        let start_time = time::Instant::now();
         let entry = unsafe { Entry::load()? };
 
         let (instance, validation_layer_enabled) = VulkanRenderer::create_instance(window, &entry)?;
@@ -178,8 +196,10 @@ impl VulkanRenderer {
 
         let render_pass = Self::create_render_pass(&logical_device, swapchain_image_format);
 
+        let descriptor_set_layout = Self::create_descriptor_set_layout(&logical_device);
+
         let (pipeline_layout, graphics_pipeline) =
-            Self::create_graphics_pipeline(&logical_device, render_pass);
+            Self::create_graphics_pipeline(&logical_device, render_pass, descriptor_set_layout);
 
         let swapchain_framebuffers = Self::create_framebuffers(
             &logical_device,
@@ -213,6 +233,21 @@ impl VulkanRenderer {
             graphics_queue,
         );
 
+        let (uniform_buffers, uniform_buffers_memory, uniform_buffers_mapped) =
+            Self::create_uniform_buffers(
+                &instance,
+                &logical_device,
+                physical_device,
+                config::MAX_FRAMES_IN_FLIGHT,
+            );
+        let descriptor_pool = Self::create_descriptor_pool(&logical_device);
+        let descriptor_sets = Self::create_descriptor_sets(
+            &logical_device,
+            descriptor_pool,
+            descriptor_set_layout,
+            &uniform_buffers,
+        );
+
         let command_buffers = Self::create_command_buffers(&logical_device, command_pool);
 
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) =
@@ -235,6 +270,7 @@ impl VulkanRenderer {
             swapchain_extent,
             swapchain_image_views,
             render_pass,
+            descriptor_set_layout,
             pipeline_layout,
             graphics_pipeline,
             swapchain_framebuffers,
@@ -248,6 +284,12 @@ impl VulkanRenderer {
             vertex_buffer_memory,
             index_buffer,
             index_buffer_memory,
+            uniform_buffers,
+            uniform_buffers_memory,
+            uniform_buffers_mapped,
+            descriptor_pool,
+            descriptor_sets,
+            start_time,
         })
     }
 
@@ -788,6 +830,8 @@ impl VulkanRenderer {
             image_index
         };
 
+        self.update_uniform_buffer(self.current_frame);
+
         let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let queue_submit_info = vk::SubmitInfo {
@@ -883,6 +927,7 @@ impl VulkanRenderer {
     fn create_graphics_pipeline(
         logical_device: &ash::Device,
         render_pass: vk::RenderPass,
+        descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> (vk::PipelineLayout, vk::Pipeline) {
         let vert_shader_code = utils::read_shader_file("shaders_compiled/triangle_vert.spv");
         let frag_shader_code = utils::read_shader_file("shaders_compiled/triangle_frag.spv");
@@ -967,7 +1012,7 @@ impl VulkanRenderer {
             polygon_mode: vk::PolygonMode::FILL,
             line_width: 1.0,
             cull_mode: vk::CullModeFlags::BACK,
-            front_face: vk::FrontFace::CLOCKWISE,
+            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
             depth_bias_enable: vk::FALSE,
             depth_bias_constant_factor: 0.0,
             depth_bias_clamp: 0.0,
@@ -1020,8 +1065,8 @@ impl VulkanRenderer {
             s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineLayoutCreateFlags::empty(),
-            set_layout_count: 0,
-            p_set_layouts: ptr::null(),
+            set_layout_count: 1,
+            p_set_layouts: &descriptor_set_layout,
             push_constant_range_count: 0,
             p_push_constant_ranges: ptr::null(),
             ..Default::default()
@@ -1304,6 +1349,14 @@ impl VulkanRenderer {
                 .cmd_set_scissor(command_buffer, 0, &[scissor]);
             // self.logical_device
             //     .cmd_draw(command_buffer, VERTICES.len() as u32, 1, 0, 0);
+            self.logical_device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[self.descriptor_sets[self.current_frame]],
+                &[],
+            );
             self.logical_device
                 .cmd_draw_indexed(command_buffer, INDICES.len() as u32, 1, 0, 0, 0);
             self.logical_device.cmd_end_render_pass(command_buffer);
@@ -1671,6 +1724,158 @@ impl VulkanRenderer {
 
         (index_buffer, index_buffer_memory)
     }
+
+    fn create_descriptor_set_layout(logical_device: &ash::Device) -> vk::DescriptorSetLayout {
+        let ubo_layout_binding = vk::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::VERTEX,
+            p_immutable_samplers: ptr::null(),
+            ..Default::default()
+        };
+
+        let layout_info = vk::DescriptorSetLayoutCreateInfo {
+            s_type: vk::StructureType::DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            binding_count: 1,
+            p_bindings: &ubo_layout_binding,
+            p_next: ptr::null(),
+            flags: vk::DescriptorSetLayoutCreateFlags::empty(),
+            ..Default::default()
+        };
+        unsafe {
+            logical_device
+                .create_descriptor_set_layout(&layout_info, None)
+                .expect("Could not create descriptor set layout")
+        }
+    }
+
+    fn create_uniform_buffers(
+        instance: &ash::Instance,
+        logical_device: &ash::Device,
+        physical_device: vk::PhysicalDevice,
+        max_frames_in_flight: usize,
+    ) -> (
+        Vec<vk::Buffer>,
+        Vec<vk::DeviceMemory>,
+        Vec<*mut UniformBufferObject>,
+    ) {
+        let buffersize = std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize;
+        let mut buffers = Vec::with_capacity(max_frames_in_flight);
+        let mut buffer_memory = Vec::with_capacity(max_frames_in_flight);
+        let mut buffers_mapped = Vec::with_capacity(max_frames_in_flight);
+
+        for _ in 0..max_frames_in_flight {
+            let (buffer, memory) = Self::create_buffer(
+                instance,
+                logical_device,
+                physical_device,
+                buffersize,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            );
+            buffers.push(buffer);
+            buffer_memory.push(memory);
+            let buffer_mapped = unsafe {
+                logical_device
+                    .map_memory(memory, 0, buffersize, vk::MemoryMapFlags::empty())
+                    .expect("Could not map memory") as *mut UniformBufferObject
+            };
+            buffers_mapped.push(buffer_mapped);
+        }
+        (buffers, buffer_memory, buffers_mapped)
+    }
+
+    fn update_uniform_buffer(&self, current_image: usize) {
+        let elapsed_time = self.start_time.elapsed().as_secs_f32();
+        let model = glm::rotate(
+            &glm::Mat4::identity(),
+            elapsed_time * 45.0f32.to_radians(),
+            &glm::vec3(0.0, 0.0, 1.0),
+        );
+        let view = glm::look_at(
+            &glm::vec3(2.0, 2.0, 2.0),
+            &glm::vec3(0.0, 0.0, 0.0),
+            &glm::vec3(0.0, 0.0, 1.0),
+        );
+        let mut proj = glm::perspective(
+            self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32,
+            45.0f32.to_radians(),
+            0.1,
+            10.0,
+        );
+        // gl to vulkan coordinate system
+        proj[(1, 1)] *= -1.0;
+        let ubo = UniformBufferObject { model, view, proj };
+        unsafe { self.uniform_buffers_mapped[current_image].copy_from_nonoverlapping(&ubo, 1) };
+    }
+
+    fn create_descriptor_pool(logical_device: &ash::Device) -> vk::DescriptorPool {
+        let pool_size = vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: config::MAX_FRAMES_IN_FLIGHT as u32,
+        };
+        let pool_info = vk::DescriptorPoolCreateInfo {
+            s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
+            max_sets: config::MAX_FRAMES_IN_FLIGHT as u32,
+            pool_size_count: 1,
+            p_pool_sizes: &pool_size,
+            p_next: ptr::null(),
+            flags: vk::DescriptorPoolCreateFlags::empty(),
+            ..Default::default()
+        };
+        unsafe {
+            logical_device
+                .create_descriptor_pool(&pool_info, None)
+                .expect("Could not create descriptor pool")
+        }
+    }
+
+    fn create_descriptor_sets(
+        logical_device: &ash::Device,
+        descriptor_pool: vk::DescriptorPool,
+        descriptor_set_layout: vk::DescriptorSetLayout,
+        uniform_buffers: &[vk::Buffer],
+    ) -> Vec<vk::DescriptorSet> {
+        let layouts = [descriptor_set_layout; config::MAX_FRAMES_IN_FLIGHT];
+        let alloc_info = vk::DescriptorSetAllocateInfo {
+            s_type: vk::StructureType::DESCRIPTOR_SET_ALLOCATE_INFO,
+            descriptor_pool,
+            descriptor_set_count: config::MAX_FRAMES_IN_FLIGHT as u32,
+            p_set_layouts: layouts.as_ptr(),
+            p_next: ptr::null(),
+            ..Default::default()
+        };
+        let descriptor_sets = unsafe {
+            logical_device
+                .allocate_descriptor_sets(&alloc_info)
+                .expect("Could not allocate descriptor sets")
+        };
+        for i in 0..config::MAX_FRAMES_IN_FLIGHT {
+            let buffer_info = vk::DescriptorBufferInfo {
+                buffer: uniform_buffers[i],
+                offset: 0,
+                range: std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize,
+            };
+            let descriptor_write = vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                dst_set: descriptor_sets[i],
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                p_image_info: ptr::null(),
+                p_buffer_info: &buffer_info,
+                p_texel_buffer_view: ptr::null(),
+                p_next: ptr::null(),
+                ..Default::default()
+            };
+            unsafe {
+                logical_device.update_descriptor_sets(&[descriptor_write], &[]);
+            }
+        }
+        descriptor_sets
+    }
 }
 
 struct QueueFamilyIndices {
@@ -1730,6 +1935,24 @@ impl Drop for VulkanRenderer {
     fn drop(&mut self) {
         self.wait_idle();
         self.cleanup_swapchain();
+
+        for &buffer in self.uniform_buffers.iter() {
+            unsafe {
+                self.logical_device.destroy_buffer(buffer, None);
+            }
+        }
+        for &memory in self.uniform_buffers_memory.iter() {
+            unsafe {
+                self.logical_device.free_memory(memory, None);
+            }
+        }
+
+        unsafe {
+            self.logical_device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+            self.logical_device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+        }
 
         for buffer in self.vertex_buffers.iter() {
             unsafe {
