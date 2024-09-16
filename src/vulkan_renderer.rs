@@ -72,7 +72,7 @@ impl Vertex {
 const VERTICES: [Vertex; 3] = [
     Vertex {
         pos: [0.0, -0.5],
-        color: [1.0, 0.0, 0.0],
+        color: [1.0, 1.0, 1.0],
     },
     Vertex {
         pos: [0.5, 0.5],
@@ -110,6 +110,8 @@ pub struct VulkanRenderer {
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
     current_frame: usize,
+    vertex_buffers: Vec<vk::Buffer>,
+    vertex_buffer_memory: vk::DeviceMemory,
 }
 
 impl VulkanRenderer {
@@ -171,6 +173,10 @@ impl VulkanRenderer {
             &surface_instance,
         );
 
+        let (vertex_buffer, vertex_buffer_memory) =
+            Self::create_vertex_buffer(&instance, physical_device, &logical_device);
+        let vertex_buffers = vec![vertex_buffer];
+
         let command_buffers = Self::create_command_buffers(&logical_device, command_pool);
 
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) =
@@ -202,6 +208,8 @@ impl VulkanRenderer {
             render_finished_semaphores,
             in_flight_fences,
             current_frame: 0,
+            vertex_buffers,
+            vertex_buffer_memory,
         })
     }
 
@@ -1222,6 +1230,16 @@ impl VulkanRenderer {
                 self.graphics_pipeline,
             )
         }
+        let vertex_offsets = [0];
+        unsafe {
+            self.logical_device.cmd_bind_vertex_buffers(
+                command_buffer,
+                0,
+                &self.vertex_buffers,
+                &vertex_offsets,
+            );
+        }
+
         let viewport = vk::Viewport {
             x: 0.0,
             y: 0.0,
@@ -1240,7 +1258,8 @@ impl VulkanRenderer {
                 .cmd_set_viewport(command_buffer, 0, &[viewport]);
             self.logical_device
                 .cmd_set_scissor(command_buffer, 0, &[scissor]);
-            self.logical_device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            self.logical_device
+                .cmd_draw(command_buffer, VERTICES.len() as u32, 1, 0, 0);
             self.logical_device.cmd_end_render_pass(command_buffer);
             self.logical_device
                 .end_command_buffer(command_buffer)
@@ -1364,6 +1383,94 @@ impl VulkanRenderer {
                 .destroy_swapchain(self.swapchain, None);
         }
     }
+
+    fn create_vertex_buffer(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        logical_device: &ash::Device,
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        let buffer_info = vk::BufferCreateInfo {
+            s_type: vk::StructureType::BUFFER_CREATE_INFO,
+            p_next: ptr::null(),
+            size: std::mem::size_of_val(&VERTICES) as u64,
+            usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            queue_family_index_count: 0,
+            p_queue_family_indices: ptr::null(),
+            flags: vk::BufferCreateFlags::empty(),
+            ..Default::default()
+        };
+
+        let buffer = unsafe {
+            logical_device
+                .create_buffer(&buffer_info, None)
+                .expect("Could not create buffer")
+        };
+
+        let mem_requirements = unsafe { logical_device.get_buffer_memory_requirements(buffer) };
+
+        let memory_type = Self::find_memory_type(
+            instance,
+            physical_device,
+            mem_requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+        let mem_alloc_info = vk::MemoryAllocateInfo {
+            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            allocation_size: mem_requirements.size,
+            memory_type_index: memory_type,
+            ..Default::default()
+        };
+
+        let buffer_memory = unsafe {
+            logical_device
+                .allocate_memory(&mem_alloc_info, None)
+                .expect("Could not allocate memory")
+        };
+        unsafe {
+            logical_device
+                .bind_buffer_memory(buffer, buffer_memory, 0)
+                .expect("Could not bind buffer memory");
+        };
+
+        let data = unsafe {
+            logical_device
+                .map_memory(
+                    buffer_memory,
+                    0,
+                    buffer_info.size,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .expect("Could not map memory") as *mut Vertex
+        };
+        unsafe {
+            data.copy_from_nonoverlapping(VERTICES.as_ptr(), VERTICES.len());
+            logical_device.unmap_memory(buffer_memory);
+        }
+
+        (buffer, buffer_memory)
+    }
+
+    fn find_memory_type(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        type_filter: u32,
+        properties: vk::MemoryPropertyFlags,
+    ) -> u32 {
+        let mem_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        for i in 0..mem_properties.memory_type_count {
+            if type_filter & (1 << i) != 0
+                && mem_properties.memory_types[i as usize]
+                    .property_flags
+                    .contains(properties)
+            {
+                return i;
+            }
+        }
+        panic!("Could not find suitable memory type");
+    }
 }
 
 struct QueueFamilyIndices {
@@ -1423,6 +1530,17 @@ impl Drop for VulkanRenderer {
     fn drop(&mut self) {
         self.wait_idle();
         self.cleanup_swapchain();
+
+        for buffer in self.vertex_buffers.iter() {
+            unsafe {
+                self.logical_device.destroy_buffer(*buffer, None);
+            }
+        }
+
+        unsafe {
+            self.logical_device
+                .free_memory(self.vertex_buffer_memory, None);
+        }
         unsafe {
             for semaphore in self.image_available_semaphores.iter() {
                 self.logical_device.destroy_semaphore(*semaphore, None);
