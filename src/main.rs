@@ -1,5 +1,6 @@
 use game_engine::config;
 use game_engine::VulkanRenderer;
+use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::{KeyEvent, WindowEvent};
@@ -8,26 +9,13 @@ use winit::keyboard::KeyCode;
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
-struct App {
-    renderer: Option<VulkanRenderer>,
-    window: Option<Window>,
-    last_frame: std::time::Instant,
+struct WindowState {
+    window: Arc<Window>,
+    renderer: VulkanRenderer,
 }
 
-impl App {
-    fn new() -> App {
-        App {
-            // Rust fields are dropped in order => renderer has to be dropped before window!
-            // Therefore, renderer is placed before window in the struct
-            renderer: None,
-            window: None,
-            last_frame: std::time::Instant::now(),
-        }
-    }
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+impl WindowState {
+    fn new(event_loop: &ActiveEventLoop) -> Self {
         let window = event_loop
             .create_window(
                 Window::default_attributes()
@@ -38,29 +26,67 @@ impl ApplicationHandler for App {
                     )),
             )
             .expect("Window creation failed");
-        self.renderer =
-            Some(VulkanRenderer::new(&window).expect(
-                "Vulkan initialization failed. Make sure that Vulkan drivers are installed",
-            ));
-        self.window = Some(window);
-        println!("succesfully created window and renderer");
+        let window = Arc::new(window);
+        let renderer = VulkanRenderer::new(&window)
+            .expect("Vulkan initialization failed. Make sure that Vulkan drivers are installed");
+        log::info!("succesfully created window and renderer");
+        WindowState { window, renderer }
+    }
+
+    fn draw(&mut self) {
+        self.window.pre_present_notify();
+        self.renderer.draw(&self.window);
+    }
+
+    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        self.renderer
+            .recreate_swapchain(new_size.to_logical(self.window.scale_factor()));
+    }
+
+    fn wait_idle(&self) {
+        self.renderer.wait_idle();
+    }
+
+    fn request_redraw(&self) {
+        self.window.request_redraw();
+    }
+}
+
+struct GameEngine {
+    window_state: Option<WindowState>,
+    last_frame: std::time::Instant,
+}
+
+impl GameEngine {
+    fn new() -> GameEngine {
+        GameEngine {
+            // Rust fields are dropped in order => renderer has to be dropped before window!
+            // Therefore, renderer is placed before window in the struct
+            window_state: None,
+            last_frame: std::time::Instant::now(),
+        }
+    }
+}
+
+impl ApplicationHandler for GameEngine {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.window_state = Some(WindowState::new(event_loop));
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+        if let Some(window_state) = &mut self.window_state {
             let mut exit = false;
             match event {
                 WindowEvent::CloseRequested => {
-                    println!("The close button was pressed; stopping");
+                    log::info!("The close button was pressed; stopping");
                     exit = true;
                 }
                 WindowEvent::RedrawRequested => {
                     self.last_frame = std::time::Instant::now();
-                    window.pre_present_notify();
-                    renderer.draw(window);
+                    window_state.draw();
                 }
                 WindowEvent::Resized(physical_size) => {
-                    renderer.recreate_swapchain(physical_size.to_logical(window.scale_factor()));
+                    window_state.resize(physical_size);
                 }
                 WindowEvent::KeyboardInput {
                     event:
@@ -72,19 +98,19 @@ impl ApplicationHandler for App {
                     ..
                 } => match key {
                     PhysicalKey::Code(KeyCode::Escape) => {
-                        println!("Escape was pressed; Closing window");
+                        log::info!("Escape was pressed; Closing window");
                         exit = true;
                     }
                     PhysicalKey::Code(KeyCode::KeyW) => {
-                        println!("Pressing W")
+                        log::info!("Pressing W")
                     }
-                    _ => println!("Something else was pressed"),
+                    _ => log::info!("Something else was pressed"),
                 },
                 _ => (),
             }
             if exit {
                 event_loop.exit();
-                renderer.wait_idle();
+                window_state.wait_idle();
             }
         }
     }
@@ -92,25 +118,25 @@ impl ApplicationHandler for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
         match cause {
             winit::event::StartCause::Poll => {
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                    //println!("Poll");
+                if let Some(window_state) = &self.window_state {
+                    window_state.request_redraw();
                 }
             }
-            _ => println!("Ignoring cause: {:?}", cause),
+            _ => log::info!("Ignoring cause: {:?}", cause),
         }
     }
 }
 
 fn main() {
+    env_logger::init();
     let event_loop = EventLoop::new().unwrap();
 
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::new();
+    let mut game_engine = GameEngine::new();
 
     event_loop
-        .run_app(&mut app)
+        .run_app(&mut game_engine)
         .expect("Runtime Error in the eventloop");
-    println!("Exiting Program");
+    log::info!("Exiting Program");
 }

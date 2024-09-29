@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
+use std::sync::Arc;
 use std::time;
 use winit::dpi::LogicalSize;
 use winit::raw_window_handle::HasDisplayHandle;
@@ -21,13 +22,6 @@ unsafe extern "system" fn vulkan_debug_callback(
     p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
     _p_user_data: *mut c_void,
 ) -> vk::Bool32 {
-    let severity = match message_severity {
-        vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => "[Verbose]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::INFO => "[Info]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => "[Warning]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => "[Error]",
-        _ => "[Unknown]",
-    };
     let types = match message_type {
         vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => "[General]",
         vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => "[Validation]",
@@ -35,7 +29,14 @@ unsafe extern "system" fn vulkan_debug_callback(
         _ => "[Unknown]",
     };
     let message = CStr::from_ptr((*p_callback_data).p_message);
-    println!("[VK_Debug]{}{}{:?}", severity, types, message);
+    match message_severity {
+        vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => log::debug!("[VK]{}{:?}", types, message),
+        vk::DebugUtilsMessageSeverityFlagsEXT::INFO => log::info!("[VK]{}{:?}", types, message),
+        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => log::warn!("[VK]{}{:?}", types, message),
+        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => log::error!("[VK]{}{:?}", types, message),
+        _ => log::error!("[VK][Unknown]{}{:?}", types, message),
+    };
+
     vk::FALSE
 }
 
@@ -118,6 +119,7 @@ const INDICES: [u32; 6] = [0, 1, 2, 2, 3, 0];
 pub struct VulkanRenderer {
     entry: Entry, //we aren't allowed to call any Vulkan functions after entry is dropped!
     instance: ash::Instance,
+    window: Arc<Window>,
     debug_utils_messenger: Option<vk::DebugUtilsMessengerEXT>,
     surface: vk::SurfaceKHR,
     surface_instance: ash::khr::surface::Instance,
@@ -155,7 +157,7 @@ pub struct VulkanRenderer {
 }
 
 impl VulkanRenderer {
-    pub fn new(window: &Window) -> Result<VulkanRenderer, Box<dyn Error>> {
+    pub fn new(window: &Arc<Window>) -> Result<VulkanRenderer, Box<dyn Error>> {
         let start_time = time::Instant::now();
         let entry = unsafe { Entry::load()? };
 
@@ -256,6 +258,7 @@ impl VulkanRenderer {
         Ok(VulkanRenderer {
             entry,
             instance,
+            window: Arc::clone(window),
             debug_utils_messenger,
             surface,
             surface_instance,
@@ -303,13 +306,13 @@ impl VulkanRenderer {
             let layer_enabled =
                 VulkanRenderer::check_validation_layer_support(&available_layers, &required_layers);
             if layer_enabled {
-                println!("Enabling Vulkan Validation Layers");
+                log::info!("Enabling Vulkan Validation Layers");
             } else {
-                println!("Can't Enable Validation Layers since required layers are missing.");
+                log::error!("Can't Enable Validation Layers since required layers are missing.");
             }
             (required_layers, layer_enabled)
         } else {
-            println!("Detected release build. Disabling Vulkan validation layers.");
+            log::info!("Detected release build. Disabling Vulkan validation layers.");
             (Vec::new(), false)
         };
         let required_layers_raw = utils::vec_cstring_to_vec_pointers(&required_layers);
@@ -371,13 +374,12 @@ impl VulkanRenderer {
             })
             .collect();
 
-        println!("Available Instance Layers: ");
-        println!("==================");
+        log::debug!("Available Instance Layers: ");
+        log::debug!("==================");
         for layer in instance_layers.iter() {
-            println!("{:?}", layer);
+            log::debug!("{:?}", layer);
         }
-        println!("==================");
-        println!();
+        log::debug!("==================");
 
         instance_layers
     }
@@ -390,13 +392,12 @@ impl VulkanRenderer {
             })
             .collect();
 
-        println!("Required Instance Layers: ");
-        println!("==================");
+        log::debug!("Required Instance Layers: ");
+        log::debug!("==================");
         for layer in required_layers.iter() {
-            println!("{:?}", layer);
+            log::debug!("{:?}", layer);
         }
-        println!("==================");
-        println!();
+        log::debug!("==================");
 
         required_layers
     }
@@ -414,7 +415,7 @@ impl VulkanRenderer {
                 }
             }
             if !layer_found {
-                println!(
+                log::error!(
                     "Required layer {:?} not found! Disabling validation layer!",
                     required_layer
                 );
@@ -476,7 +477,7 @@ impl VulkanRenderer {
                 .expect("There should be atleast one working Vulkan device!")
         };
 
-        println!(
+        log::info!(
             "Found {} devices with Vulkan support",
             physical_devices.len()
         );
@@ -485,7 +486,7 @@ impl VulkanRenderer {
             .into_iter()
             .filter(|device| Self::is_device_suitable(instance, *device, surface_instance, surface))
             .collect();
-        println!("Found {} suitable devices", suitable_physical_devices.len());
+        log::info!("Found {} suitable devices", suitable_physical_devices.len());
 
         suitable_physical_devices
             .sort_by_key(|device| Reverse(Self::get_device_suitability_score(instance, *device)));
@@ -500,7 +501,7 @@ impl VulkanRenderer {
         let device_name = device_properties
             .device_name_as_c_str()
             .expect("Should be able to convert dev name to c_str");
-        println!("Choosing device {:?}", device_name);
+        log::info!("Choosing device {:?}", device_name);
         chosen_device
     }
 
@@ -602,7 +603,7 @@ impl VulkanRenderer {
         let mut unique_queue_families = HashSet::new();
         unique_queue_families.insert(graphics_q_fam_idx);
         unique_queue_families.insert(present_q_fam_idx);
-        println!("Using Queue Families: {:?}", unique_queue_families);
+        log::debug!("Using Queue Families: {:?}", unique_queue_families);
         let mut queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = Vec::new();
         for queue_family_index in unique_queue_families {
             let device_queue_create_info = vk::DeviceQueueCreateInfo {
@@ -931,8 +932,8 @@ impl VulkanRenderer {
     ) -> (vk::PipelineLayout, vk::Pipeline) {
         let vert_shader_code = utils::read_shader_file("shaders_compiled/triangle_vert.spv");
         let frag_shader_code = utils::read_shader_file("shaders_compiled/triangle_frag.spv");
-        println!("Vertex Shader Code len: {:?} bytes", vert_shader_code.len());
-        println!(
+        log::debug!("Vertex Shader Code len: {:?} bytes", vert_shader_code.len());
+        log::debug!(
             "Fragment Shader Code len: {:?} bytes",
             frag_shader_code.len()
         );
@@ -1992,7 +1993,7 @@ impl Drop for VulkanRenderer {
             self.logical_device.destroy_device(None);
         }
 
-        println!("Cleaning Up Vulkan Renderer");
+        log::info!("Cleaning Up Vulkan Renderer");
         if let Some(debug_utils_messenger) = self.debug_utils_messenger {
             let debug_utils_instance = debug_utils::Instance::new(&self.entry, &self.instance);
             unsafe {
